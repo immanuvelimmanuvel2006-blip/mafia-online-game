@@ -4,7 +4,7 @@ const { Server } = require("socket.io");
 
 /**
  * ==========================================================
- * Mafia Game Rules (Your Final Rules)
+ * Mafia Game Rules (Final)
  * ==========================================================
  * Roles:
  * - Town
@@ -21,16 +21,17 @@ const { Server } = require("socket.io");
  * - Doctor protects: 2 minutes
  * - Mafia kills: 3 minutes (mafia vote, majority wins, tie => no kill)
  * - Execution: 3 minutes (system resolves kill)
- * - Detective investigates: 3 minutes (private result)
+ * - Detective investigates: REMOVED as separate phase
  *
- * Role reveal on death: YES
- * Win:
- * - Town wins if Mafia alive = 0
- * - Mafia wins if Mafia alive >= Town alive
+ * NEW CHANGES:
+ * 1) Detective works FULL DAY:
+ *    - Detective can investigate 1 person per day
+ *    - Can investigate during DAY_DISCUSSION or DAY_VOTING
+ *    - Result is private: "MAFIA" or "NOT MAFIA"
  *
- * Host/Admin:
- * - Creates room and gets room code
- * - Host is NOT a player (no role, no vote, cannot die)
+ * 2) Refresh Reconnect Support (Host + Players):
+ *    - Host and players get a token stored in browser localStorage
+ *    - After refresh, they reconnect automatically using restore_session
  */
 
 const app = express();
@@ -50,7 +51,6 @@ const SETTINGS = {
   DOCTOR: 2 * 60,
   MAFIA: 3 * 60,
   EXECUTION: 3 * 60,
-  DETECTIVE: 3 * 60,
   ANNOUNCEMENT: 15,
 };
 
@@ -69,25 +69,30 @@ const PHASES = {
   DOCTOR: "DOCTOR",
   MAFIA: "MAFIA",
   EXECUTION: "EXECUTION",
-  DETECTIVE: "DETECTIVE",
   ANNOUNCEMENT: "ANNOUNCEMENT",
   ENDED: "ENDED",
 };
 
 /**
- * Rooms are stored in memory:
- * rooms[roomCode] = roomObject
+ * Rooms stored in memory
  */
 const rooms = new Map();
 
-/**
- * Generate room code like: A7K3Q
- */
 function makeRoomCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let code = "";
   for (let i = 0; i < 5; i++) code += chars[Math.floor(Math.random() * chars.length)];
   return code;
+}
+
+function makeToken() {
+  return (
+    Math.random().toString(36).slice(2) +
+    "-" +
+    Date.now().toString(36) +
+    "-" +
+    Math.random().toString(36).slice(2)
+  );
 }
 
 function getRoom(roomCode) {
@@ -113,9 +118,8 @@ function checkWin(room) {
 }
 
 /**
- * Public state sent to all:
- * - Alive roles hidden
- * - Dead roles revealed
+ * Public state for everyone
+ * Alive roles hidden, dead roles revealed
  */
 function emitRoomState(roomCode) {
   const room = getRoom(roomCode);
@@ -140,16 +144,13 @@ function emitRoomState(roomCode) {
 }
 
 function sendPrivateRoles(room) {
-  // Get all mafia names
   const mafiaNames = room.players
     .filter((p) => p.role === ROLES.MAFIA)
     .map((p) => p.name);
 
   room.players.forEach((p) => {
-    // Send role to everyone privately
     io.to(p.id).emit("your_role", { role: p.role });
 
-    // If player is mafia, also send mafia team list
     if (p.role === ROLES.MAFIA) {
       io.to(p.id).emit("mafia_team", { mafiaNames });
     }
@@ -170,7 +171,12 @@ function startPhase(roomCode, phase, seconds) {
   if (phase === PHASES.DAY_VOTING) room.dayVotes = {};
   if (phase === PHASES.DOCTOR) room.night.doctorTargetId = null;
   if (phase === PHASES.MAFIA) room.night.mafiaVotes = {};
-  if (phase === PHASES.DETECTIVE) room.night.detectiveTargetId = null;
+
+  // Reset detective usage at start of day
+  if (phase === PHASES.DAY_DISCUSSION) {
+    room.dayDetectiveUsed = false;
+    room.dayDetectiveTargetId = null;
+  }
 
   emitRoomState(roomCode);
 
@@ -180,8 +186,8 @@ function startPhase(roomCode, phase, seconds) {
 
 /**
  * Assign roles:
- * - Always 1 Doctor, 1 Detective
- * - Mafia count based on players
+ * Always 1 Doctor + 1 Detective
+ * Mafia count based on players
  */
 function assignRoles(room) {
   const n = room.players.length;
@@ -298,10 +304,7 @@ function resolveMafiaKillTarget(room) {
 }
 
 /**
- * Resolve night kill with Doctor protection:
- * - Doctor protects FIRST
- * - Mafia kills AFTER
- * - If mafia target == protected => saved
+ * Resolve night kill with Doctor protection
  */
 function resolveNightKill(roomCode) {
   const room = getRoom(roomCode);
@@ -332,27 +335,6 @@ function resolveNightKill(roomCode) {
   if (winner) endGame(roomCode, winner);
 }
 
-/**
- * Resolve detective privately:
- * - Detective sees Mafia / Not Mafia
- */
-function resolveDetective(roomCode) {
-  const room = getRoom(roomCode);
-  if (!room) return;
-
-  const detective = room.players.find((p) => p.alive && p.role === ROLES.DETECTIVE);
-  if (!detective) return;
-
-  const targetId = room.night.detectiveTargetId;
-  if (!targetId) return;
-
-  const target = room.players.find((p) => p.id === targetId);
-  if (!target || !target.alive) return;
-
-  const result = target.role === ROLES.MAFIA ? "MAFIA" : "NOT MAFIA";
-  io.to(detective.id).emit("detective_result", { targetName: target.name, result });
-}
-
 function endGame(roomCode, winner) {
   const room = getRoom(roomCode);
   if (!room) return;
@@ -377,7 +359,7 @@ function endGame(roomCode, winner) {
 }
 
 /**
- * Game phase flow (state machine)
+ * Game phase flow
  */
 function advancePhase(roomCode) {
   const room = getRoom(roomCode);
@@ -413,12 +395,6 @@ function advancePhase(roomCode) {
     case PHASES.EXECUTION:
       resolveNightKill(roomCode);
       if (room.phase === PHASES.ENDED) return;
-      startPhase(roomCode, PHASES.DETECTIVE, SETTINGS.DETECTIVE);
-      return;
-
-    case PHASES.DETECTIVE:
-      resolveDetective(roomCode);
-      if (room.phase === PHASES.ENDED) return;
       startPhase(roomCode, PHASES.ANNOUNCEMENT, SETTINGS.ANNOUNCEMENT);
       return;
 
@@ -440,14 +416,52 @@ function advancePhase(roomCode) {
 io.on("connection", (socket) => {
   console.log("Connected:", socket.id);
 
-  // ==========================================================
-  // CHAT SYSTEM (NEW)
-  // ==========================================================
+  /**
+   * Restore session after refresh (Host + Players)
+   */
+  socket.on("restore_session", ({ roomCode, token }, cb) => {
+    roomCode = String(roomCode || "").trim().toUpperCase();
+    token = String(token || "").trim();
+
+    const room = getRoom(roomCode);
+    if (!room) return cb?.({ error: "Room not found." });
+
+    // Restore host
+    if (room.hostToken && room.hostToken === token) {
+      room.hostId = socket.id;
+      socket.join(roomCode);
+
+      emitRoomState(roomCode);
+
+      return cb?.({ ok: true, type: "HOST" });
+    }
+
+    // Restore player
+    const player = room.players.find((p) => p.token === token);
+    if (!player) return cb?.({ error: "Session not found." });
+
+    player.id = socket.id;
+    socket.join(roomCode);
+
+    // resend role
+    io.to(player.id).emit("your_role", { role: player.role });
+
+    // resend mafia team if mafia
+    if (player.role === ROLES.MAFIA) {
+      const mafiaNames = room.players
+        .filter((p) => p.role === ROLES.MAFIA)
+        .map((p) => p.name);
+      io.to(player.id).emit("mafia_team", { mafiaNames });
+    }
+
+    emitRoomState(roomCode);
+
+    return cb?.({ ok: true, type: "PLAYER" });
+  });
 
   /**
    * PUBLIC CHAT
-   * Rule: ONLY ALIVE PLAYERS can send.
-   * Everyone in room can read.
+   * Only alive players can send
    */
   socket.on("public_chat", ({ roomCode, message }, cb) => {
     roomCode = String(roomCode || "").trim().toUpperCase();
@@ -456,10 +470,7 @@ io.on("connection", (socket) => {
 
     const sender = room.players.find((p) => p.id === socket.id);
 
-    // Host cannot send public chat
     if (!sender) return cb?.({ error: "Host cannot send public chat." });
-
-    // Dead players cannot send public chat
     if (!sender.alive) return cb?.({ error: "Dead players cannot send public chat." });
 
     const text = String(message || "").trim();
@@ -475,10 +486,7 @@ io.on("connection", (socket) => {
   });
 
   /**
-   * MAFIA PRIVATE CHAT (ALWAYS ON)
-   * Rule:
-   * - Only alive Mafia can send
-   * - Only alive Mafia can read
+   * MAFIA PRIVATE CHAT
    */
   socket.on("mafia_chat", ({ roomCode, message }, cb) => {
     roomCode = String(roomCode || "").trim().toUpperCase();
@@ -487,13 +495,8 @@ io.on("connection", (socket) => {
 
     const sender = room.players.find((p) => p.id === socket.id);
 
-    // Host cannot use mafia chat
     if (!sender) return cb?.({ error: "Host cannot use mafia chat." });
-
-    // Dead players cannot use mafia chat
     if (!sender.alive) return cb?.({ error: "Dead players cannot use mafia chat." });
-
-    // Only Mafia can use mafia chat
     if (sender.role !== ROLES.MAFIA) return cb?.({ error: "Only Mafia can use mafia chat." });
 
     const text = String(message || "").trim();
@@ -512,11 +515,9 @@ io.on("connection", (socket) => {
     cb?.({ ok: true });
   });
 
-  // ==========================================================
-  // GAME EVENTS
-  // ==========================================================
-
-  // Host creates room (host is NOT a player)
+  /**
+   * Host creates room
+   */
   socket.on("create_room", ({ hostName }, cb) => {
     let roomCode = makeRoomCode();
     while (rooms.has(roomCode)) roomCode = makeRoomCode();
@@ -524,30 +525,38 @@ io.on("connection", (socket) => {
     const room = {
       roomCode,
       hostId: socket.id,
+      hostToken: makeToken(), // NEW
       hostName: hostName?.trim() || "Host",
+
       phase: PHASES.LOBBY,
       phaseEndsAt: null,
       round: 1,
       announcement: "Room created. Waiting for players...",
       timer: null,
 
-      players: [], // ONLY PLAYERS
+      players: [],
       dayVotes: {},
+
+      // detective full day tracking
+      dayDetectiveUsed: false,
+      dayDetectiveTargetId: null,
+
       night: {
         doctorTargetId: null,
         mafiaVotes: {},
-        detectiveTargetId: null,
       },
     };
 
     rooms.set(roomCode, room);
     socket.join(roomCode);
 
-    cb({ roomCode });
+    cb({ roomCode, hostToken: room.hostToken });
     emitRoomState(roomCode);
   });
 
-  // Player joins room
+  /**
+   * Player joins room
+   */
   socket.on("join_room", ({ roomCode, playerName }, cb) => {
     roomCode = String(roomCode || "").trim().toUpperCase();
     const room = getRoom(roomCode);
@@ -555,20 +564,25 @@ io.on("connection", (socket) => {
     if (!room) return cb({ error: "Room not found." });
     if (room.phase !== PHASES.LOBBY) return cb({ error: "Game already started." });
 
+    const token = makeToken();
+
     room.players.push({
       id: socket.id,
+      token,
       name: playerName?.trim() || "Player",
       role: null,
       alive: true,
     });
 
     socket.join(roomCode);
-    cb({ ok: true });
 
+    cb({ ok: true, token });
     emitRoomState(roomCode);
   });
 
-  // Host starts game
+  /**
+   * Host starts game
+   */
   socket.on("start_game", ({ roomCode }, cb) => {
     roomCode = String(roomCode || "").trim().toUpperCase();
     const room = getRoom(roomCode);
@@ -589,7 +603,9 @@ io.on("connection", (socket) => {
     cb({ ok: true });
   });
 
-  // Day vote by players
+  /**
+   * Day vote
+   */
   socket.on("cast_vote", ({ roomCode, targetId }, cb) => {
     roomCode = String(roomCode || "").trim().toUpperCase();
     const room = getRoom(roomCode);
@@ -609,7 +625,9 @@ io.on("connection", (socket) => {
     emitRoomState(roomCode);
   });
 
-  // Doctor protects
+  /**
+   * Doctor protects
+   */
   socket.on("doctor_protect", ({ roomCode, targetId }, cb) => {
     roomCode = String(roomCode || "").trim().toUpperCase();
     const room = getRoom(roomCode);
@@ -628,7 +646,9 @@ io.on("connection", (socket) => {
     cb({ ok: true });
   });
 
-  // Mafia votes kill
+  /**
+   * Mafia vote kill
+   */
   socket.on("mafia_vote_kill", ({ roomCode, targetId }, cb) => {
     roomCode = String(roomCode || "").trim().toUpperCase();
     const room = getRoom(roomCode);
@@ -647,55 +667,70 @@ io.on("connection", (socket) => {
     cb({ ok: true });
   });
 
-  // Detective investigates
+  /**
+   * Detective investigates FULL DAY
+   * Allowed in:
+   * - DAY_DISCUSSION
+   * - DAY_VOTING
+   * Only 1 check per day
+   */
   socket.on("detective_check", ({ roomCode, targetId }, cb) => {
     roomCode = String(roomCode || "").trim().toUpperCase();
     const room = getRoom(roomCode);
 
     if (!room) return cb({ error: "Room not found." });
-    if (room.phase !== PHASES.DETECTIVE) return cb({ error: "Not Detective phase." });
+
+    // Only during day
+    if (room.phase !== PHASES.DAY_DISCUSSION && room.phase !== PHASES.DAY_VOTING) {
+      return cb({ error: "Detective can investigate only during the day." });
+    }
 
     const detective = room.players.find((p) => p.id === socket.id);
     if (!detective || !detective.alive) return cb({ error: "You are not alive." });
     if (detective.role !== ROLES.DETECTIVE) return cb({ error: "You are not Detective." });
 
+    if (room.dayDetectiveUsed) {
+      return cb({ error: "You already used investigation today." });
+    }
+
     const target = room.players.find((p) => p.id === targetId);
     if (!target || !target.alive) return cb({ error: "Target not alive." });
 
-    room.night.detectiveTargetId = targetId;
+    room.dayDetectiveUsed = true;
+    room.dayDetectiveTargetId = targetId;
+
+    const result = target.role === ROLES.MAFIA ? "MAFIA" : "NOT MAFIA";
+    io.to(detective.id).emit("detective_result", { targetName: target.name, result });
+
     cb({ ok: true });
   });
 
+  /**
+   * Disconnect (IMPORTANT)
+   * We do NOT remove player / kill player on refresh.
+   * They can reconnect using token.
+   */
   socket.on("disconnect", () => {
     console.log("Disconnected:", socket.id);
 
-    // If host disconnects => end room
     for (const [roomCode, room] of rooms.entries()) {
       if (room.hostId === socket.id) {
-        io.to(roomCode).emit("room_closed", { message: "Host disconnected. Room closed." });
-        rooms.delete(roomCode);
+        room.announcement = "Host disconnected (can reconnect).";
+        emitRoomState(roomCode);
         return;
       }
-    }
 
-    // If player disconnects => mark dead
-    for (const [roomCode, room] of rooms.entries()) {
       const p = room.players.find((x) => x.id === socket.id);
       if (!p) continue;
 
-      p.alive = false;
-      room.announcement = `${p.name} disconnected and is removed. Role: ${p.role || "Unknown"}`;
-
-      const winner = checkWin(room);
-      if (winner) endGame(roomCode, winner);
-
+      room.announcement = `${p.name} disconnected (can reconnect).`;
       emitRoomState(roomCode);
     }
   });
 });
 
 /**
- * IMPORTANT for Render hosting:
+ * IMPORTANT for Render:
  * Must use process.env.PORT
  */
 const PORT = process.env.PORT || 3000;
