@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+  <title>Mafia Timed Game</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="container">
+    <h1>Mafia Timed Game</h1>
+
+    <div class="card">
+      <div><b>Room:</b> <span id="roomCode">-</span></div>
+      <div><b>Round:</b> <span id="round">-</span></div>
+      <div><b>Phase:</b> <span id="phase">-</span></div>
+      <div><b>Time Left:</b> <span id="timer">-</span></div>
+      <div><b>Announcement:</b> <span id="announcement">-</span></div>
+    </div>
+
+    <div class="card" id="authBox">
+      <h2>Create Room (Host)</h2>
+      <input id="hostNameInput" placeholder="Host name" />
+      <button id="createRoomBtn">Create Room</button>
+
+      <hr />
+
+      <h2>Join Room (Player)</h2>
+      <input id="playerNameInput" placeholder="Player name" />
+      <input id="roomCodeInput" placeholder="Room Code" />
+      <button id="joinRoomBtn">Join Room</button>
+
+      <div class="small">Minimum 6 players required to start.</div>
+    </div>
+
+    <div class="card hidden" id="gameBox">
+      <h2>Game</h2>
+
+      <div class="row">
+        <button id="startBtn" class="hidden">Start Game (Host Only)</button>
+      </div>
+
+      <div class="card mini">
+        <div><b>Your Role:</b> <span id="myRole">HOST / Unknown</span></div>
+        <div id="detectiveResult" class="small"></div>
+      </div>
+
+      <h3>Players</h3>
+      <div id="playersList"></div>
+
+      <div class="card mini hidden" id="actionBox">
+        <h3>Action Panel</h3>
+        <div id="actionText" class="small"></div>
+        <div id="targets" class="targets"></div>
+      </div>
+
+      <!-- PUBLIC CHAT -->
+      <div class="card mini">
+        <h3>Public Chat (Alive Players Only)</h3>
+
+        <div id="publicChatMessages" class="chatBox"></div>
+
+        <div class="row">
+          <input id="publicChatInput" placeholder="Type public message..." />
+          <button id="publicChatSendBtn">Send</button>
+        </div>
+      </div>
+
+      <!-- MAFIA PRIVATE CHAT -->
+      <div class="card mini hidden" id="mafiaChatBox">
+        <h3>Mafia Private Chat (Only Mafia)</h3>
+
+        <div id="mafiaChatMessages" class="chatBox"></div>
+
+        <div class="row">
+          <input id="mafiaChatInput" placeholder="Type mafia message..." />
+          <button id="mafiaChatSendBtn">Send</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card hidden" id="finalBox">
+      <h2>Game Over</h2>
+      <div id="winnerText"></div>
+      <h3>Final Roles</h3>
+      <div id="finalRoles"></div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="client.js"></script>
+</body>
+</html>
