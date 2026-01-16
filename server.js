@@ -4,13 +4,18 @@ const { Server } = require("socket.io");
 
 /**
  * ==========================================================
- * Mafia Game Rules (Final)
+ * Mafia Game Rules (FINAL + Refresh Reconnect + Full Day Detective)
  * ==========================================================
+ *
  * Roles:
- * - Town
- * - Mafia
- * - Doctor
- * - Detective
+ * - TOWN
+ * - MAFIA
+ * - DOCTOR
+ * - DETECTIVE
+ *
+ * Host/Admin:
+ * - Creates room and gets room code
+ * - Host is NOT a player (no role, no vote, cannot die)
  *
  * Day:
  * - Discussion: 12 minutes
@@ -21,29 +26,29 @@ const { Server } = require("socket.io");
  * - Doctor protects: 2 minutes
  * - Mafia kills: 3 minutes (mafia vote, majority wins, tie => no kill)
  * - Execution: 3 minutes (system resolves kill)
- * - Detective investigates: REMOVED as separate phase
+ * - Announcement: 15 seconds
  *
- * NEW CHANGES:
- * 1) Detective works FULL DAY:
- *    - Detective can investigate 1 person per day
- *    - Can investigate during DAY_DISCUSSION or DAY_VOTING
- *    - Result is private: "MAFIA" or "NOT MAFIA"
+ * Detective:
+ * - FULL DAY (DAY_DISCUSSION + DAY_VOTING)
+ * - Can investigate ONLY 1 person per day
+ * - Private result: "MAFIA" or "NOT MAFIA"
  *
- * 2) Refresh Reconnect Support (Host + Players):
- *    - Host and players get a token stored in browser localStorage
- *    - After refresh, they reconnect automatically using restore_session
+ * Chat:
+ * - Public Chat: only alive players can send (everyone can read)
+ * - Mafia Chat: only alive mafia can send/read
+ *
+ * Refresh reconnect:
+ * - Host and players get token
+ * - token stored in browser localStorage
+ * - restore_session reconnects same player/host after refresh
  */
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-// Serve frontend files
 app.use(express.static("public"));
 
-/**
- * Timers in seconds
- */
 const SETTINGS = {
   DAY_DISCUSSION: 12 * 60,
   DAY_VOTING: 3 * 60,
@@ -73,9 +78,7 @@ const PHASES = {
   ENDED: "ENDED",
 };
 
-/**
- * Rooms stored in memory
- */
+// In-memory rooms
 const rooms = new Map();
 
 function makeRoomCode() {
@@ -118,7 +121,7 @@ function checkWin(room) {
 }
 
 /**
- * Public state for everyone
+ * Public state sent to everyone
  * Alive roles hidden, dead roles revealed
  */
 function emitRoomState(roomCode) {
@@ -172,7 +175,7 @@ function startPhase(roomCode, phase, seconds) {
   if (phase === PHASES.DOCTOR) room.night.doctorTargetId = null;
   if (phase === PHASES.MAFIA) room.night.mafiaVotes = {};
 
-  // Reset detective usage at start of day
+  // Reset detective usage at start of each day
   if (phase === PHASES.DAY_DISCUSSION) {
     room.dayDetectiveUsed = false;
     room.dayDetectiveTargetId = null;
@@ -186,8 +189,8 @@ function startPhase(roomCode, phase, seconds) {
 
 /**
  * Assign roles:
- * Always 1 Doctor + 1 Detective
- * Mafia count based on players
+ * - Always 1 Doctor + 1 Detective
+ * - Mafia count depends on player count
  */
 function assignRoles(room) {
   const n = room.players.length;
@@ -215,9 +218,7 @@ function assignRoles(room) {
 }
 
 /**
- * Resolve day voting:
- * - Highest votes eliminated
- * - Tie => no elimination
+ * Resolve day voting
  */
 function resolveDayVoting(roomCode) {
   const room = getRoom(roomCode);
@@ -266,8 +267,7 @@ function resolveDayVoting(roomCode) {
 }
 
 /**
- * Resolve mafia majority vote:
- * - Tie => no kill
+ * Resolve mafia majority vote target
  */
 function resolveMafiaKillTarget(room) {
   const alive = alivePlayers(room);
@@ -359,7 +359,7 @@ function endGame(roomCode, winner) {
 }
 
 /**
- * Game phase flow
+ * Phase flow (state machine)
  */
 function advancePhase(roomCode) {
   const room = getRoom(roomCode);
@@ -425,14 +425,13 @@ io.on("connection", (socket) => {
 
     const room = getRoom(roomCode);
     if (!room) return cb?.({ error: "Room not found." });
+    if (!token) return cb?.({ error: "Invalid token." });
 
     // Restore host
     if (room.hostToken && room.hostToken === token) {
       room.hostId = socket.id;
       socket.join(roomCode);
-
       emitRoomState(roomCode);
-
       return cb?.({ ok: true, type: "HOST" });
     }
 
@@ -455,7 +454,6 @@ io.on("connection", (socket) => {
     }
 
     emitRoomState(roomCode);
-
     return cb?.({ ok: true, type: "PLAYER" });
   });
 
@@ -525,9 +523,9 @@ io.on("connection", (socket) => {
     const room = {
       roomCode,
       hostId: socket.id,
-      hostToken: makeToken(), // NEW
-      hostName: hostName?.trim() || "Host",
+      hostToken: makeToken(), // IMPORTANT
 
+      hostName: hostName?.trim() || "Host",
       phase: PHASES.LOBBY,
       phaseEndsAt: null,
       round: 1,
@@ -550,7 +548,9 @@ io.on("connection", (socket) => {
     rooms.set(roomCode, room);
     socket.join(roomCode);
 
+    // IMPORTANT: client expects hostToken
     cb({ roomCode, hostToken: room.hostToken });
+
     emitRoomState(roomCode);
   });
 
@@ -577,6 +577,7 @@ io.on("connection", (socket) => {
     socket.join(roomCode);
 
     cb({ ok: true, token });
+
     emitRoomState(roomCode);
   });
 
@@ -706,20 +707,22 @@ io.on("connection", (socket) => {
   });
 
   /**
-   * Disconnect (IMPORTANT)
-   * We do NOT remove player / kill player on refresh.
+   * Disconnect
+   * Do NOT kill/remove player on refresh.
    * They can reconnect using token.
    */
   socket.on("disconnect", () => {
     console.log("Disconnected:", socket.id);
 
     for (const [roomCode, room] of rooms.entries()) {
+      // Host disconnect
       if (room.hostId === socket.id) {
         room.announcement = "Host disconnected (can reconnect).";
         emitRoomState(roomCode);
         return;
       }
 
+      // Player disconnect
       const p = room.players.find((x) => x.id === socket.id);
       if (!p) continue;
 
@@ -730,7 +733,7 @@ io.on("connection", (socket) => {
 });
 
 /**
- * IMPORTANT for Render:
+ * IMPORTANT for hosting:
  * Must use process.env.PORT
  */
 const PORT = process.env.PORT || 3000;
